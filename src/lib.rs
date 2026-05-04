@@ -17,6 +17,8 @@
 pub mod error;
 pub mod types;
 pub mod reader;
+pub mod sheets;
+pub mod sync;
 
 #[cfg(test)]
 mod tests;
@@ -25,3 +27,4 @@ mod tests;
 pub use error::{MMBakError, Result};
 pub use types::*;
 pub use reader::{MMBakFile, MMBakReader};
+pub use sync::{SyncConfig, sync_balances, build_rows};

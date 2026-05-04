@@ -66,9 +66,26 @@ enum Commands {
         /// Backup file to analyze
         file: PathBuf,
     },
+
+    /// Sync account balances to Google Sheets Entity_Log
+    SyncSheet {
+        /// Path to sync configuration TOML
+        #[arg(short, long, default_value = "sync_config.toml")]
+        config: PathBuf,
+
+        /// Backup file to read
+        file: PathBuf,
+
+        /// Preview what would be updated without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
+    // Install the ring crypto provider for rustls (required by hyper-rustls)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     let result = match cli.command {
@@ -82,6 +99,13 @@ fn main() {
         Commands::Accounts { file, detailed } => list_accounts(file, detailed),
         Commands::Categories { file } => list_categories(file),
         Commands::Stats { file } => show_stats(file),
+        Commands::SyncSheet { config, file, dry_run } => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(sync_sheet(file, config, dry_run))
+        }
     };
 
     if let Err(e) = result {
@@ -189,9 +213,9 @@ fn list_transactions(
             };
 
             let amount_str = if tx.transaction_type == mmbak_parser::TransactionType::Expense {
-                format!("{:>15.2}", tx.amount).red()
+                format!("{:15.2}", tx.amount).red()
             } else {
-                format!("{:>15.2}", tx.amount).green()
+                format!("{:15.2}", tx.amount).green()
             };
 
             let category = tx.category_name.as_deref().unwrap_or("-");
@@ -219,7 +243,7 @@ fn list_transactions(
                 "{} {} {} {}",
                 &tx.date[..10.min(tx.date.len())],
                 type_symbol,
-                format!("{:>10.2}", tx.amount),
+                format!("{:10.2}", tx.amount),
                 tx.description()
             );
         }
@@ -238,7 +262,7 @@ fn list_accounts(path: PathBuf, detailed: bool) -> Result<()> {
 
     if detailed {
         println!(
-            "{:30} {:>15} {:10} {}",
+            "{:30} {:15} {:10} {}",
             "Name".bold(),
             "Balance".bold(),
             "Type".bold(),
@@ -254,9 +278,9 @@ fn list_accounts(path: PathBuf, detailed: bool) -> Result<()> {
             };
 
             let balance_str = if account.calculated_balance >= 0.0 {
-                format!("{:>15.2}", account.calculated_balance).green()
+                format!("{:15.2}", account.calculated_balance).green()
             } else {
-                format!("{:>15.2}", account.calculated_balance).red()
+                format!("{:15.2}", account.calculated_balance).red()
             };
 
             println!(
@@ -270,9 +294,9 @@ fn list_accounts(path: PathBuf, detailed: bool) -> Result<()> {
     } else {
         for account in &accounts {
             let balance_str = if account.calculated_balance >= 0.0 {
-                format!("{:>15.2}", account.calculated_balance).green()
+                format!("{:15.2}", account.calculated_balance).green()
             } else {
-                format!("{:>15.2}", account.calculated_balance).red()
+                format!("{:15.2}", account.calculated_balance).red()
             };
 
             println!(
@@ -394,6 +418,18 @@ fn show_stats(path: PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn sync_sheet(file: PathBuf, config: PathBuf, dry_run: bool) -> Result<()> {
+    let backup = MMBakFile::open(&file)?;
+    let sync_config = mmbak_parser::SyncConfig::from_file(&config)?;
+
+    if dry_run {
+        println!("{}", "=== DRY RUN ===".yellow().bold());
+    }
+
+    mmbak_parser::sync_balances(&backup, &sync_config, dry_run,
+    ).await
 }
 
 /// Helper to truncate strings with ellipsis

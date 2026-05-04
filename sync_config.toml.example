@@ -1,0 +1,31 @@
+# Google Sheets sync configuration for mmbak-parser
+# Copy this file to sync_config.toml and fill in your values.
+
+# Google Sheets spreadsheet ID (from the URL)
+# e.g. https://docs.google.com/spreadsheets/d/1ABC123.../edit
+spreadsheet_id = "YOUR_SPREADSHEET_ID"
+
+# Path to your Google service account JSON key file
+service_account_key = "/path/to/service-account-key.json"
+
+# Account name mappings: each entry maps an .mmbak account name
+# to an Entity_Log entity.  Run `mmbak accounts --detailed sample.mmbak`
+# to see the exact names in your backup file.
+
+[[mappings]]
+mmbak_name = "POSB/DBS Savings"
+entity_name = "POSB/DBS - Saving Account"
+entity_id = 1
+symbol = "SGD"
+
+[[mappings]]
+mmbak_name = "Coinhako ETH"
+entity_name = "Coinhako - ETH"
+entity_id = 5
+symbol = "ETH"
+
+[[mappings]]
+mmbak_name = "Ledger BTC"
+entity_name = "Ledger Account - BTC #1"
+entity_id = 7
+symbol = "BTC"
