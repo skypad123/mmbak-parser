@@ -27,31 +27,48 @@ pub struct AccountMapping {
     pub mmbak_name: String,
     /// The entity_name value in Entity_Log
     pub entity_name: String,
-    /// The entity_id value in Entity_Log
-    pub entity_id: i64,
-    /// The symbol (e.g. "SGD", "BTC")
-    pub symbol: String,
+    /// The entity_id value in Entity_Log.
+    /// If omitted, an XLOOKUP formula is inserted in column B instead.
+    pub entity_id: Option<i64>,
 }
 
 /// A single row to append to Entity_Log
 #[derive(Debug, Clone)]
 pub struct EntityLogRow {
     pub timestamp: String,
-    pub entity_id: i64,
+    /// `None` means an XLOOKUP formula will be used in column B
+    pub entity_id: Option<i64>,
     pub denormation_holding: String,
     pub entity_name: String,
-    pub symbol: String,
     pub valuation: String,
 }
 
 impl EntityLogRow {
+    /// Build the XLOOKUP formula for entity_id (column B) when it's not provided.
+    fn entity_id_formula(&self) -> String {
+        format!(
+            r#"=XLOOKUP(INDIRECT("D"&ROW()),Entity!$C$2:$C$1005,Entity!$A$2:$A$1005,"NOT_FOUND")"#
+        )
+    }
+
+    /// Build the XLOOKUP formula for symbol (column E).
+    fn symbol_formula(&self) -> String {
+        format!(
+            r#"=XLOOKUP(INDIRECT("D"&ROW()),Entity!$C$2:$C$1005,Entity!$E$2:$E$1005,"NOT_FOUND")"#
+        )
+    }
+
     fn to_vec(&self) -> Vec<String> {
+        let entity_id_cell = match self.entity_id {
+            Some(id) => id.to_string(),
+            None => self.entity_id_formula(),
+        };
         vec![
             self.timestamp.clone(),
-            self.entity_id.to_string(),
+            entity_id_cell,
             self.denormation_holding.clone(),
             self.entity_name.clone(),
-            self.symbol.clone(),
+            self.symbol_formula(),
             self.valuation.clone(),
         ]
     }
@@ -93,7 +110,6 @@ pub fn build_rows(backup: &MMBakFile, config: &SyncConfig) -> Result<Vec<EntityL
             entity_id: mapping.entity_id,
             denormation_holding: balance_str.clone(),
             entity_name: mapping.entity_name.clone(),
-            symbol: mapping.symbol.clone(),
             valuation: balance_str,
         });
     }
@@ -110,13 +126,17 @@ pub fn preview_rows(rows: &[EntityLogRow]) {
     );
     println!("{}", "─".repeat(110));
     for row in rows {
+        let entity_display = match row.entity_id {
+            Some(id) => id.to_string(),
+            None => "<XLOOKUP>".to_string(),
+        };
         println!(
             "{:20} {:8} {:>15} {:30} {:8} {:>15}",
             row.timestamp,
-            row.entity_id,
+            entity_display,
             row.denormation_holding,
             row.entity_name,
-            row.symbol,
+            "<XLOOKUP>",
             row.valuation
         );
     }
