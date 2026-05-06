@@ -82,4 +82,4 @@ Copy `sync_config.toml.example` → `sync_config.toml` and fill in your spreadsh
 
 ## License
 
-MIT © [YOUR_NAME](https://github.com/YOUR_USERNAME)
+MIT © [Tan Yunliang](https://github.com/skypad123)
