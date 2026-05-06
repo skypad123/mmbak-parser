@@ -26,6 +26,8 @@ impl TransactionType {
             0 => Some(TransactionType::Income),
             1 => Some(TransactionType::Expense),
             3 | 4 => Some(TransactionType::Transfer),
+            7 => Some(TransactionType::Income), // Market value increase
+            8 => Some(TransactionType::Expense), // Market value decrease
             _ => None,
         }
     }
@@ -46,6 +48,8 @@ impl fmt::Display for TransactionType {
 pub struct Transaction {
     pub uid: String,
     pub transaction_type: TransactionType,
+    /// Raw DO_TYPE value from the database (0=Income, 1=Expense, 3=TransferOut, 4=TransferIn, 7/8=ModifiedBal)
+    pub raw_do_type: i64,
     pub amount: f64,
     pub date: String,
     pub category_uid: Option<String>,
@@ -81,6 +85,13 @@ impl Transaction {
             return category.clone();
         }
         "No description".to_string()
+    }
+
+    /// Returns true if this is the "destination" side of a transfer pair
+    /// (DO_TYPE=4).  These records are mirrors of the DO_TYPE=3 source
+    /// side and must be skipped during balance calculation.
+    pub fn is_transfer_in(&self) -> bool {
+        self.raw_do_type == 4
     }
 }
 

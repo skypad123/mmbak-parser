@@ -1,5 +1,5 @@
-use std::path::Path;
 use rusqlite::Connection;
+use std::path::Path;
 
 use crate::error::{MMBakError, Result};
 use crate::types::*;
@@ -16,7 +16,7 @@ impl MMBakReader {
         let path = path.as_ref();
         let file_size = std::fs::metadata(path)?.len();
         let conn = Connection::open(path)?;
-        
+
         Ok(MMBakReader { conn, file_size })
     }
 
@@ -26,13 +26,13 @@ impl MMBakReader {
         let mut assets = self.read_assets()?;
         let categories = self.read_categories()?;
         let currencies = self.read_currencies()?;
-        
+
         // Calculate balances for each asset based on transactions
         self.calculate_asset_balances(&mut assets, &transactions);
-        
+
         // Calculate statistics
         let stats = self.calculate_stats(&transactions, &assets, &categories, &currencies)?;
-        
+
         Ok(MMBakFile {
             transactions,
             assets,
@@ -49,17 +49,18 @@ impl MMBakReader {
             "SELECT ZUID, ZDO_TYPE, ZAMOUNT, ZTXDATESTR, ZCATEGORYUID, ZCATEGORY_NAME, 
                     ZASSETUID, ZASSET_NAME, ZTOASSETUID, ZCURRENCYUID, ZMEMO, ZPAID, ZISDEL
              FROM ZINOUTCOME
-             ORDER BY ZDATE DESC"
+             ORDER BY ZDATE DESC",
         )?;
 
         let transactions = stmt.query_map([], |row| {
             let uid: String = row.get(0)?;
             let do_type: Option<String> = row.get(1)?;
-            let transaction_type = do_type
+            let raw_do_type = do_type
                 .as_deref()
                 .and_then(|s| s.parse::<i64>().ok())
-                .and_then(TransactionType::from_i64)
-                .unwrap_or(TransactionType::Expense);
+                .unwrap_or(1);
+            let transaction_type =
+                TransactionType::from_i64(raw_do_type).unwrap_or(TransactionType::Expense);
             let amount: f64 = row.get(2)?;
             let date: Option<String> = row.get(3)?;
             let category_uid: Option<String> = row.get(4)?;
@@ -75,6 +76,7 @@ impl MMBakReader {
             Ok(Transaction {
                 uid,
                 transaction_type,
+                raw_do_type,
                 amount,
                 date: date.unwrap_or_default(),
                 category_uid,
@@ -99,7 +101,7 @@ impl MMBakReader {
         let mut stmt = self.conn.prepare(
             "SELECT ZUID, ZNICNAME, ZTYPE, ZLEFTMONEY, ZCURRENCYUID, ZGROUPUID, ZMEMO, ZISDEL
              FROM ZASSET
-             ORDER BY ZORDER"
+             ORDER BY ZORDER",
         )?;
 
         let assets = stmt.query_map([], |row| {
@@ -131,18 +133,26 @@ impl MMBakReader {
             .map_err(|e| MMBakError::SqliteError(e))
     }
 
-    /// Calculate asset balances from transaction history
+    /// Calculate asset balances from transaction history.
+    ///
+    /// MoneyManager stores transfers as **paired records**:
+    /// - DO_TYPE=3: the "source" side (money leaving `asset_uid`, arriving at `to_asset_uid`)
+    /// - DO_TYPE=4: the "destination" side (mirror record, money leaving `asset_uid`, arriving at `to_asset_uid`)
+    ///
+    /// Processing both sides independently would double-count the transfer.  We
+    /// therefore **skip DO_TYPE=4** (TransferIn) records and only apply the
+    /// DO_TYPE=3 (TransferOut) side.
     fn calculate_asset_balances(&self, assets: &mut [Asset], transactions: &[Transaction]) {
         use std::collections::HashMap;
-        
+
         // Create a map of asset UID to balance
         let mut balances: HashMap<String, f64> = HashMap::new();
-        
+
         for tx in transactions {
             if tx.is_deleted {
                 continue;
             }
-            
+
             match tx.transaction_type {
                 TransactionType::Income => {
                     // Income: Add to asset balance
@@ -157,7 +167,12 @@ impl MMBakReader {
                     }
                 }
                 TransactionType::Transfer => {
-                    // Transfer: Subtract from source, add to destination
+                    // Transfer: only process the "source" side (DO_TYPE=3).
+                    // The "destination" side (DO_TYPE=4) is a mirror record
+                    // that must be ignored to avoid double-counting.
+                    if tx.is_transfer_in() {
+                        continue;
+                    }
                     if let Some(from_asset_uid) = &tx.asset_uid {
                         *balances.entry(from_asset_uid.clone()).or_insert(0.0) -= tx.amount;
                     }
@@ -167,7 +182,7 @@ impl MMBakReader {
                 }
             }
         }
-        
+
         // Apply calculated balances to assets
         for asset in assets.iter_mut() {
             if let Some(balance) = balances.get(&asset.uid) {
@@ -181,7 +196,7 @@ impl MMBakReader {
         let mut stmt = self.conn.prepare(
             "SELECT ZUID, ZNAME, ZPUID, ZDOTYPE, ZSTATUS, ZISDEL
              FROM ZCATEGORY
-             ORDER BY ZORDER"
+             ORDER BY ZORDER",
         )?;
 
         let categories = stmt.query_map([], |row| {
@@ -212,7 +227,7 @@ impl MMBakReader {
         let mut stmt = self.conn.prepare(
             "SELECT ZUID, ZISO, ZSYMBOL, ZRATE, ZISMAINCURRENCY, ZISSHOW
              FROM ZCURRENCY
-             ORDER BY ZORDERSEQ"
+             ORDER BY ZORDERSEQ",
         )?;
 
         let currencies = stmt.query_map([], |row| {
@@ -246,15 +261,9 @@ impl MMBakReader {
         categories: &[Category],
         currencies: &[Currency],
     ) -> Result<DatabaseStats> {
-        let active_transactions: Vec<_> = transactions
-            .iter()
-            .filter(|t| !t.is_deleted)
-            .collect();
+        let active_transactions: Vec<_> = transactions.iter().filter(|t| !t.is_deleted).collect();
 
-        let active_assets: Vec<_> = assets
-            .iter()
-            .filter(|a| !a.is_deleted)
-            .collect();
+        let active_assets: Vec<_> = assets.iter().filter(|a| !a.is_deleted).collect();
 
         let mut total_income = 0.0;
         let mut total_expense = 0.0;
@@ -263,7 +272,7 @@ impl MMBakReader {
             match tx.transaction_type {
                 TransactionType::Income => total_income += tx.amount,
                 TransactionType::Expense => total_expense += tx.amount,
-                TransactionType::Transfer => {}, // Transfers don't affect total income/expense
+                TransactionType::Transfer => {} // Transfers don't affect total income/expense
             }
         }
 
