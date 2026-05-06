@@ -1,4 +1,4 @@
-# mmbak
+# mmbak-parser
 
 [![Rust](https://img.shields.io/badge/rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
