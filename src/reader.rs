@@ -20,6 +20,10 @@ impl MMBakReader {
         Ok(MMBakReader { conn, file_size })
     }
 
+    fn file_path(&self) -> String {
+        self.conn.path().unwrap_or("").to_string()
+    }
+
     /// Parse the complete database
     pub fn parse(self) -> Result<MMBakFile> {
         let transactions = self.read_transactions()?;
@@ -32,6 +36,7 @@ impl MMBakReader {
 
         // Calculate statistics
         let stats = self.calculate_stats(&transactions, &assets, &categories, &currencies)?;
+        let file_path = self.file_path();
 
         Ok(MMBakFile {
             transactions,
@@ -40,16 +45,22 @@ impl MMBakReader {
             currencies,
             stats,
             file_size: self.file_size,
+            file_path,
         })
     }
 
     /// Read all transactions from ZINOUTCOME table
     fn read_transactions(&self) -> Result<Vec<Transaction>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ZUID, ZDO_TYPE, ZAMOUNT, ZTXDATESTR, ZCATEGORYUID, ZCATEGORY_NAME, 
-                    ZASSETUID, ZASSET_NAME, ZTOASSETUID, ZCURRENCYUID, ZMEMO, ZPAID, ZISDEL
-             FROM ZINOUTCOME
-             ORDER BY ZDATE DESC",
+            "SELECT t.ZUID, t.ZDO_TYPE, t.ZAMOUNT, t.ZTXDATESTR, t.ZCATEGORYUID, cat.ZNAME, par.ZNAME,
+                    t.ZASSETUID, src.ZNICNAME, t.ZTOASSETUID, dest.ZNICNAME,
+                    t.ZCURRENCYUID, t.ZMEMO, t.ZCONTENT, t.ZPAID, t.ZISDEL
+             FROM ZINOUTCOME t
+             LEFT JOIN ZASSET src    ON src.ZUID   = t.ZASSETUID
+             LEFT JOIN ZASSET dest   ON dest.ZUID  = t.ZTOASSETUID
+             LEFT JOIN ZCATEGORY cat ON cat.ZUID   = t.ZCATEGORYUID
+             LEFT JOIN ZCATEGORY par ON par.ZUID   = cat.ZPUID AND cat.ZPUID != 0
+             ORDER BY t.ZDATE DESC",
         )?;
 
         let transactions = stmt.query_map([], |row| {
@@ -65,13 +76,16 @@ impl MMBakReader {
             let date: Option<String> = row.get(3)?;
             let category_uid: Option<String> = row.get(4)?;
             let category_name: Option<String> = row.get(5)?;
-            let asset_uid: Option<String> = row.get(6)?;
-            let asset_name: Option<String> = row.get(7)?;
-            let to_asset_uid: Option<String> = row.get(8)?;
-            let currency_uid: Option<String> = row.get(9)?;
-            let memo: Option<String> = row.get(10)?;
-            let payee: Option<String> = row.get(11)?;
-            let is_deleted: i64 = row.get(12).unwrap_or(0);
+            let parent_category_name: Option<String> = row.get(6)?;
+            let asset_uid: Option<String> = row.get(7)?;
+            let asset_name: Option<String> = row.get(8)?;
+            let to_asset_uid: Option<String> = row.get(9)?;
+            let to_asset_name: Option<String> = row.get(10)?;
+            let currency_uid: Option<String> = row.get(11)?;
+            let memo: Option<String> = row.get(12)?;
+            let note: Option<String> = row.get(13)?;
+            let payee: Option<String> = row.get(14)?;
+            let is_deleted: i64 = row.get(15).unwrap_or(0);
 
             Ok(Transaction {
                 uid,
@@ -81,11 +95,14 @@ impl MMBakReader {
                 date: date.unwrap_or_default(),
                 category_uid,
                 category_name,
+                parent_category_name,
                 asset_uid,
                 asset_name,
                 to_asset_uid,
+                to_asset_name,
                 currency_uid,
                 memo,
+                note,
                 payee,
                 is_deleted: is_deleted != 0,
             })
@@ -136,16 +153,14 @@ impl MMBakReader {
     /// Calculate asset balances from transaction history.
     ///
     /// MoneyManager stores transfers as **paired records**:
-    /// - DO_TYPE=3: the "source" side (money leaving `asset_uid`, arriving at `to_asset_uid`)
-    /// - DO_TYPE=4: the "destination" side (mirror record, money leaving `asset_uid`, arriving at `to_asset_uid`)
+    /// - DO_TYPE=3 (TransferOut): money leaving `asset_uid`, arriving at `to_asset_uid`
+    /// - DO_TYPE=4 (TransferIn): mirror record from the destination's perspective
     ///
-    /// Processing both sides independently would double-count the transfer.  We
-    /// therefore **skip DO_TYPE=4** (TransferIn) records and only apply the
-    /// DO_TYPE=3 (TransferOut) side.
+    /// We process the TransferOut side to debit the source and credit the destination,
+    /// and skip the TransferIn mirror to avoid double-counting.
     fn calculate_asset_balances(&self, assets: &mut [Asset], transactions: &[Transaction]) {
         use std::collections::HashMap;
 
-        // Create a map of asset UID to balance
         let mut balances: HashMap<String, f64> = HashMap::new();
 
         for tx in transactions {
@@ -155,30 +170,28 @@ impl MMBakReader {
 
             match tx.transaction_type {
                 TransactionType::Income => {
-                    // Income: Add to asset balance
                     if let Some(asset_uid) = &tx.asset_uid {
                         *balances.entry(asset_uid.clone()).or_insert(0.0) += tx.amount;
                     }
                 }
                 TransactionType::Expense => {
-                    // Expense: Subtract from asset balance
                     if let Some(asset_uid) = &tx.asset_uid {
                         *balances.entry(asset_uid.clone()).or_insert(0.0) -= tx.amount;
                     }
                 }
-                TransactionType::Transfer => {
-                    // Transfer: only process the "source" side (DO_TYPE=3).
-                    // The "destination" side (DO_TYPE=4) is a mirror record
-                    // that must be ignored to avoid double-counting.
-                    if tx.is_transfer_in() {
-                        continue;
+                TransactionType::TransferOut => {
+                    // Debit the source account
+                    if let Some(from_uid) = &tx.asset_uid {
+                        *balances.entry(from_uid.clone()).or_insert(0.0) -= tx.amount;
                     }
-                    if let Some(from_asset_uid) = &tx.asset_uid {
-                        *balances.entry(from_asset_uid.clone()).or_insert(0.0) -= tx.amount;
+                    // Credit the destination account
+                    if let Some(to_uid) = &tx.to_asset_uid {
+                        *balances.entry(to_uid.clone()).or_insert(0.0) += tx.amount;
                     }
-                    if let Some(to_asset_uid) = &tx.to_asset_uid {
-                        *balances.entry(to_asset_uid.clone()).or_insert(0.0) += tx.amount;
-                    }
+                }
+                TransactionType::TransferIn => {
+                    // Mirror record — skip to avoid double-counting
+                    continue;
                 }
             }
         }
@@ -272,7 +285,7 @@ impl MMBakReader {
             match tx.transaction_type {
                 TransactionType::Income => total_income += tx.amount,
                 TransactionType::Expense => total_expense += tx.amount,
-                TransactionType::Transfer => {} // Transfers don't affect total income/expense
+                TransactionType::TransferOut | TransactionType::TransferIn => {} // Transfers don't affect total income/expense
             }
         }
 
@@ -298,6 +311,7 @@ pub struct MMBakFile {
     currencies: Vec<Currency>,
     stats: DatabaseStats,
     file_size: u64,
+    file_path: String,
 }
 
 impl MMBakFile {
@@ -350,6 +364,11 @@ impl MMBakFile {
     /// Get file size
     pub fn file_size(&self) -> u64 {
         self.file_size
+    }
+
+    /// Get the original file path (used by the TUI to re-open for group queries)
+    pub fn file_path_hint(&self) -> &str {
+        &self.file_path
     }
 
     /// Find an asset by UID

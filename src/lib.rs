@@ -19,6 +19,7 @@ pub mod types;
 pub mod reader;
 pub mod sheets;
 pub mod sync;
+pub mod tui;
 
 #[cfg(test)]
 mod tests;

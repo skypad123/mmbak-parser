@@ -1,14 +1,16 @@
 use std::fmt;
 
-/// Transaction type (income, expense, or transfer)
+/// Transaction type (income, expense, transfer out, or transfer in)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionType {
-    /// Expense transaction
+    /// Expense transaction (DO_TYPE=1) or market value decrease (DO_TYPE=8)
     Expense,
-    /// Income transaction
+    /// Income transaction (DO_TYPE=0) or market value increase (DO_TYPE=7)
     Income,
-    /// Transfer between accounts
-    Transfer,
+    /// Transfer out — money leaving this account (DO_TYPE=3)
+    TransferOut,
+    /// Transfer in — money arriving at this account (DO_TYPE=4)
+    TransferIn,
 }
 
 impl TransactionType {
@@ -16,7 +18,8 @@ impl TransactionType {
         match s {
             "E" => Some(TransactionType::Expense),
             "I" => Some(TransactionType::Income),
-            "T" => Some(TransactionType::Transfer),
+            "TO" => Some(TransactionType::TransferOut),
+            "TI" => Some(TransactionType::TransferIn),
             _ => None,
         }
     }
@@ -25,11 +28,20 @@ impl TransactionType {
         match value {
             0 => Some(TransactionType::Income),
             1 => Some(TransactionType::Expense),
-            3 | 4 => Some(TransactionType::Transfer),
+            3 => Some(TransactionType::TransferOut),
+            4 => Some(TransactionType::TransferIn),
             7 => Some(TransactionType::Income), // Market value increase
             8 => Some(TransactionType::Expense), // Market value decrease
             _ => None,
         }
+    }
+
+    /// Returns true if this is a transfer (either direction)
+    pub fn is_transfer(&self) -> bool {
+        matches!(
+            self,
+            TransactionType::TransferIn | TransactionType::TransferOut
+        )
     }
 }
 
@@ -38,7 +50,8 @@ impl fmt::Display for TransactionType {
         match self {
             TransactionType::Expense => write!(f, "Expense"),
             TransactionType::Income => write!(f, "Income"),
-            TransactionType::Transfer => write!(f, "Transfer"),
+            TransactionType::TransferOut => write!(f, "TransferOut"),
+            TransactionType::TransferIn => write!(f, "TransferIn"),
         }
     }
 }
@@ -48,17 +61,20 @@ impl fmt::Display for TransactionType {
 pub struct Transaction {
     pub uid: String,
     pub transaction_type: TransactionType,
-    /// Raw DO_TYPE value from the database (0=Income, 1=Expense, 3=TransferOut, 4=TransferIn, 7/8=ModifiedBal)
+    /// Raw DO_TYPE value from the database (0=Income, 1=Expense, 3=TransferOut, 4=TransferIn, 7=MktIncrease, 8=MktDecrease)
     pub raw_do_type: i64,
     pub amount: f64,
     pub date: String,
     pub category_uid: Option<String>,
     pub category_name: Option<String>,
+    pub parent_category_name: Option<String>,
     pub asset_uid: Option<String>,
     pub asset_name: Option<String>,
     pub to_asset_uid: Option<String>,
+    pub to_asset_name: Option<String>,
     pub currency_uid: Option<String>,
     pub memo: Option<String>,
+    pub note: Option<String>,
     pub payee: Option<String>,
     pub is_deleted: bool,
 }
@@ -71,6 +87,19 @@ impl Transaction {
 
     /// Get a short description of the transaction
     pub fn description(&self) -> String {
+        // For transfers, show the account route regardless of memo
+        if self.transaction_type == TransactionType::TransferOut
+            || self.transaction_type == TransactionType::TransferIn
+        {
+            let from = self.asset_name.as_deref().unwrap_or("?");
+            let to = self.to_asset_name.as_deref().unwrap_or("?");
+            return format!("{} → {}", from, to);
+        }
+        if let Some(note) = &self.note {
+            if !note.is_empty() {
+                return note.clone();
+            }
+        }
         if let Some(memo) = &self.memo {
             if !memo.is_empty() {
                 return memo.clone();
@@ -81,17 +110,7 @@ impl Transaction {
                 return payee.clone();
             }
         }
-        if let Some(category) = &self.category_name {
-            return category.clone();
-        }
         "No description".to_string()
-    }
-
-    /// Returns true if this is the "destination" side of a transfer pair
-    /// (DO_TYPE=4).  These records are mirrors of the DO_TYPE=3 source
-    /// side and must be skipped during balance calculation.
-    pub fn is_transfer_in(&self) -> bool {
-        self.raw_do_type == 4
     }
 }
 
